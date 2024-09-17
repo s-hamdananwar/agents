@@ -1,5 +1,11 @@
 # livekit-plugins-openai
 
+## 0.8.4
+
+### Patch Changes
+
+- avoid returning tiny frames from TTS - [#747](https://github.com/livekit/agents/pull/747) ([@theomonnom](https://github.com/theomonnom))
+
 ## 0.8.3
 
 ### Patch Changes
