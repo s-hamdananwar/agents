@@ -118,6 +118,11 @@ class AssistantTranscriptionOptions:
     )
     """The tokenizer used to split the speech into words.
     This is used to simulate the "interim results" of the agent transcription."""
+    word_tokenizer_without_punctuation: tokenize.WordTokenizer = tokenize.basic.WordTokenizer(
+        ignore_punctuation=True
+    )
+    """The tokenizer used to split the speech into words without punctuation.
+    This is used to validate if the tigger phrase is said by the user."""
     hyphenate_word: Callable[[str], list[str]] = tokenize.basic.hyphenate_word
     """A function that takes a string (word) as input and returns a list of strings,
     representing the hyphenated parts of the word."""
@@ -147,6 +152,7 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         loop: asyncio.AbstractEventLoop | None = None,
         # backward compatibility
         will_synthesize_assistant_reply: WillSynthesizeAssistantReply | None = None,
+        trigger_phrase: str | None = None,
     ) -> None:
         """
         Create a new VoiceAssistant.
@@ -171,6 +177,7 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
                 (e.g: editing the pronunciation of a word).
             plotting: Whether to enable plotting for debugging. matplotlib must be installed.
             loop: Event loop to use. Default to asyncio.get_event_loop().
+            trigger_phrase: Phrase to trigger an assitant for a response.
         """
         super().__init__()
         self._loop = loop or asyncio.get_event_loop()
@@ -238,6 +245,17 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         self._last_end_of_speech_time: float | None = None
 
         self._update_state_task: asyncio.Task | None = None
+
+        self._speech_just_started: bool | None = None
+        self._trigger_words_found: bool | None = None
+
+        self._trigger_phrase_words: list[str] | None
+
+        if trigger_phrase is not None:
+            self._speech_just_started, self._trigger_words_found = False, False
+            self._trigger_phrase_words = self._opts.transcription.word_tokenizer_without_punctuation.tokenize(
+                text=trigger_phrase
+            )
 
     @property
     def fnc_ctx(self) -> FunctionContext | None:
@@ -387,6 +405,7 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
         def _on_start_of_speech(ev: vad.VADEvent) -> None:
             self._plotter.plot_event("user_started_speaking")
             self.emit("user_started_speaking")
+            self._speech_just_started = True
             self._deferred_validation.on_human_start_of_speech(ev)
             self._update_state("listening")
 
@@ -421,6 +440,32 @@ class VoiceAssistant(utils.EventEmitter[EventTypes]):
 
         def _on_final_transcript(ev: stt.SpeechEvent) -> None:
             new_transcript = ev.alternatives[0].text
+
+            # check for trigger phrase
+            if self._trigger_phrase_words is not None:
+                new_transcribed_text = self._transcribed_text + (
+                    " " if self._transcribed_text else ""
+                ) + new_transcript
+                new_transcribed_text_words = self._opts.transcription.word_tokenizer_without_punctuation.tokenize(
+                    text=new_transcribed_text
+                )
+
+                if self._speech_just_started:
+                    # check if trigger words match
+                    for i in range(len(self._trigger_phrase_words)):
+                        if self._trigger_phrase_words[i].lower() != new_transcribed_text_words[i].lower():
+                            self._speech_just_started = False
+                            self._trigger_words_found = False
+                            # ignore user speech by not sending it to LLM
+                            return
+                        elif 1 == len(self._trigger_phrase_words) - 1:
+                            self._speech_just_started = False
+                            self._trigger_words_found = True
+                else:
+                    if not self._trigger_words_found:
+                        # ignore user speech by not sending it to LLM
+                        return
+
             self._transcribed_text += (
                 " " if self._transcribed_text else ""
             ) + new_transcript
